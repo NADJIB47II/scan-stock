@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Scan Stock</title>
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--tx:#1b1b1b;--mu:#6b6b6b;--ac:#0f6e56;--ac2:#e1f5ee;--bd:#e0e0dc;--wa:#b4531a;--wa2:#fcebdd;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#161615;--card:#222221;--tx:#efefec;--mu:#9a9a95;--ac:#4fc3a1;--ac2:#14352c;--bd:#383835;--wa:#f0a070;--wa2:#3a2516}}
+:root[data-theme="dark"]{--bg:#161615;--card:#222221;--tx:#efefec;--mu:#9a9a95;--ac:#4fc3a1;--ac2:#14352c;--bd:#383835;--wa:#f0a070;--wa2:#3a2516}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:12px;max-width:640px;margin-inline:auto}
+h1{font-size:20px;margin:4px 0 12px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:12px}
+button,.btn{font:inherit;border:1px solid var(--bd);background:var(--card);color:var(--tx);border-radius:10px;padding:10px 14px;cursor:pointer}
+button.p{background:var(--ac);color:#fff;border-color:var(--ac)}
+input[type=text]{font:inherit;width:100%;padding:10px;border:1px solid var(--bd);border-radius:10px;background:var(--bg);color:var(--tx)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:1}
+video{width:100%;max-height:240px;object-fit:cover;border-radius:10px;background:#000;display:none;margin-bottom:8px}
+.mu{color:var(--mu);font-size:14px}
+.big{font-size:20px;font-weight:600}
+.qty{font-size:40px;font-weight:700;color:var(--ac)}
+.ctr{display:flex;align-items:center;gap:14px}
+.ctr button{width:48px;height:48px;font-size:24px;padding:0;flex:none}
+.warn{background:var(--wa2);color:var(--wa);border-radius:10px;padding:10px;margin-top:8px}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--bd);white-space:nowrap}
+td.a{white-space:normal}
+.pick{display:block;width:100%;text-align:left;margin-top:6px}
+.ok{color:var(--ac)}.ko{color:var(--wa)}
+</style>
+</head>
+<body>
+<h1>📦 Scan Stock</h1>
+
+<div class="card">
+  <div class="row">
+    <button class="p" id="bCam">📷 Scanner</button>
+    <label class="btn" style="text-align:center">📥 Importer le stock (CSV)<input type="file" id="fCsv" accept=".csv,text/csv,text/plain" hidden></label>
+  </div>
+  <div class="mu" id="info" style="margin-top:8px">Aucun stock importé. Dans Google Sheets : Fichier → Télécharger → CSV, puis importe-le ici.</div>
+  <video id="v" playsinline muted></video>
+  <label class="mu" style="display:block;margin-top:8px"><input type="checkbox" id="cons"> Mode consultation (afficher le stock sans compter)</label>
+  <div style="margin-top:8px"><input type="text" id="man" placeholder="Saisir ou scanner une référence (ex. 420/1461/100/40) ou un nom" enterkeyhint="search"></div>
+  <div id="msg"></div>
+</div>
+
+<div class="card" id="last" style="display:none"></div>
+
+<div class="card">
+  <div class="row" style="margin-bottom:8px"><div class="big" style="flex:2">Articles comptés</div><button id="bExp">⬇ Exporter CSV</button><button id="bRst">Remise à zéro</button></div>
+  <div class="tw"><table><thead><tr><th>Article</th><th>Taille</th><th>Feuille</th><th>Compté</th><th>Écart</th></tr></thead><tbody id="tb"></tbody></table></div>
+  <div class="mu" id="emp">Aucun article scanné pour l'instant.</div>
+</div>
+
+<div class="mu" style="text-align:center;margin-bottom:16px"><a href="https://docs.google.com/spreadsheets/d/1eOEplVmUGymcggRB954yktJNZg46XH3WOIx2ecpllH0/edit" target="_blank" rel="noopener" style="color:var(--ac)">Ouvrir le Google Sheet de stock</a></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js"></script>
+<script>
+const $=s=>document.querySelector(s);
+const norm=s=>String(s==null?'':s).toUpperCase().replace(/[^A-Z0-9]/g,'');
+const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let cat=[],counts={},alias={},lastKey=null,pending=null;
+try{cat=JSON.parse(localStorage.getItem('ss_cat')||'[]');counts=JSON.parse(localStorage.getItem('ss_cnt')||'{}');alias=JSON.parse(localStorage.getItem('ss_ali')||'{}')}catch(e){}
+function save(){try{localStorage.setItem('ss_cat',JSON.stringify(cat));localStorage.setItem('ss_cnt',JSON.stringify(counts));localStorage.setItem('ss_ali',JSON.stringify(alias))}catch(e){}}
+const byKey=k=>cat.find(c=>c.k===k);
+function msg(t,cls){$('#msg').innerHTML=t?'<div class="warn">'+t+'</div>':''}
+
+function parseCSV(t){
+  const first=t.split(/\r?\n/,1)[0]||'';const d=(first.match(/;/g)||[]).length>(first.match(/,/g)||[]).length?';':',';
+  const rows=[];let r=[],c='',q=false;
+  for(let i=0;i<t.length;i++){const ch=t[i];
+    if(q){if(ch=='"'){if(t[i+1]=='"'){c+='"';i++}else q=false}else c+=ch}
+    else if(ch=='"')q=true;else if(ch==d){r.push(c);c=''}
+    else if(ch=='\n'||ch=='\r'){if(ch=='\r'&&t[i+1]=='\n')i++;r.push(c);rows.push(r);r=[];c=''}
+    else c+=ch}
+  if(c!==''||r.length){r.push(c);rows.push(r)}
+  return rows}
+
+function importCSV(text){
+  const rows=parseCSV(text),map={};let zone='';
+  rows.forEach(r=>{
+    const a=(r[0]||'').trim();
+    if(/^ZONE\s/i.test(a)){zone=a.toUpperCase();return}
+    if(!a||/^article$/i.test(a))return;
+    const qty=parseFloat(String(r[4]||'').replace(',','.'));
+    if(isNaN(qty))return;
+    const ref=(r[1]||'').trim(),taille=(r[2]||'').trim(),pt=(r[3]||'').trim();
+    const k=ref?norm(ref):'N'+norm(a+taille+pt);
+    if(!map[k])map[k]={k,article:a,ref,taille:taille||pt,stock:0,zones:[],zq:{}};
+    map[k].stock+=qty;{const zz=zone||'?';map[k].zq[zz]=(map[k].zq[zz]||0)+qty}if(zone&&!map[k].zones.includes(zone))map[k].zones.push(zone)});
+  cat=Object.values(map);save();info();render();
+  return cat.length}
+function info(){$('#info').textContent=cat.length?cat.length+' références chargées depuis la feuille de stock.':'Aucun stock importé. Dans Google Sheets : Fichier → Télécharger → CSV, puis importe-le ici.'}
+
+$('#fCsv').addEventListener('change',e=>{
+  const f=e.target.files[0];if(!f)return;
+  const rd=new FileReader();rd.onload=()=>{const n=importCSV(String(rd.result));msg(n?'':'Aucun article reconnu dans ce fichier.')};
+  rd.readAsText(f,'utf-8')});
+
+function add(k,d){
+  const c=counts[k]||{n:0,t:0};c.n=Math.max(0,c.n+d);c.t=Date.now();counts[k]=c;
+  if(c.n===0)delete counts[k];
+  lastKey=k;save();render()}
+
+function hitKey(k){if($('#cons').checked){lastKey=k;render()}else add(k,1)}
+function lookup(code){
+  const n=norm(code);if(!n)return;
+  msg('');pending=null;
+  let k=alias[n]&&byKey(alias[n])?alias[n]:null;
+  if(!k){const m=cat.find(c=>c.ref&&norm(c.ref)===n);if(m)k=m.k}
+  if(k){hitKey(k);if(navigator.vibrate)navigator.vibrate(60);return}
+  const s=cat.filter(c=>(c.article+' '+c.taille+' '+c.ref).toLowerCase().includes(String(code).toLowerCase())).slice(0,6);
+  pending=n;
+  let h='Code « '+esc(code)+' » introuvable.';
+  if(s.length)h+=' Choisis l\'article correspondant :'+s.map(c=>'<button class="pick" data-k="'+esc(c.k)+'">'+esc(c.article)+(c.taille?' · '+esc(c.taille):'')+(c.ref?' · '+esc(c.ref):'')+'</button>').join('');
+  else h+=' Aucun article proche trouvé : tape un nom dans le champ de saisie.';
+  msg(h)}
+$('#msg').addEventListener('click',e=>{const b=e.target.closest('.pick');if(!b||!pending)return;
+  const k=b.dataset.k;if(/^\d{8,14}$/.test(pending))alias[pending]=k;hitKey(k);pending=null;msg('')});
+$('#man').addEventListener('keydown',e=>{if(e.key==='Enter'){lookup(e.target.value.trim());e.target.value=''}});
+
+function render(){
+  const ks=Object.keys(counts).sort((a,b)=>counts[b].t-counts[a].t);
+  $('#emp').style.display=ks.length?'none':'block';
+  $('#tb').innerHTML=ks.map(k=>{const c=byKey(k)||{article:k,taille:'',stock:0};const n=counts[k].n,e=n-c.stock;
+    return '<tr><td class="a">'+esc(c.article)+'</td><td>'+esc(c.taille)+'</td><td>'+c.stock+'</td><td><b>'+n+'</b></td><td class="'+(e===0?'ok':'ko')+'">'+(e>0?'+':'')+e+'</td></tr>'}).join('');
+  const L=$('#last'),c=lastKey&&byKey(lastKey);
+  if(!c){L.style.display='none';return}
+  L.style.display='block';
+  const sib=cat.filter(x=>norm(x.article)===norm(c.article));
+  const tot=sib.reduce((s,x)=>s+x.stock,0);
+  const zq=c.zq||{};const zt=Object.keys(zq).map(z=>z+' : '+zq[z]).join(' · ');
+  const sz=sib.length>1?sib.slice().sort((a,b)=>String(a.taille).localeCompare(String(b.taille),undefined,{numeric:true})).map(x=>(x.taille||'—')+' : '+x.stock).join(' · '):'';
+  const extra='<div style="border-top:1px solid var(--bd);padding-top:8px"><div>Stock total de cette référence : <b>'+c.stock+'</b></div>'+(zt?'<div class="mu">Par zone → '+esc(zt)+'</div>':'')+(sib.length>1?'<div style="margin-top:6px">Stock total « '+esc(c.article)+' » (toutes tailles) : <b>'+tot+'</b></div><div class="mu">Par taille → '+esc(sz)+'</div>':'')+'</div>';
+  L.innerHTML='<div class="big">'+esc(c.article)+'</div><div class="mu">'+esc(c.ref)+(c.taille?' · Taille/pointure '+esc(c.taille):'')+(c.zones.length?' · '+esc(c.zones.join(', ')):'')+'</div>'+
+  '<div class="ctr" style="margin:10px 0"><button id="m">−</button><div class="qty">'+(counts[lastKey]||{n:0}).n+'</div><button id="pl">+</button><div class="mu">compté<br>(feuille : '+c.stock+')</div></div>'+extra;
+  $('#m').onclick=()=>add(lastKey,-1);$('#pl').onclick=()=>add(lastKey,1)}
+
+$('#bRst').onclick=()=>{if(confirm('Remettre tous les comptages à zéro ?')){counts={};lastKey=null;save();render()}};
+$('#bExp').onclick=async()=>{
+  const ks=Object.keys(counts);if(!ks.length){msg('Rien à exporter.');return}
+  const q=v=>'"'+String(v==null?'':v).replace(/"/g,'""')+'"';
+  const lines=[['Article','Référence','Taille/Pointure','Zones','Stock feuille','Compté','Écart'].map(q).join(',')];
+  ks.forEach(k=>{const c=byKey(k)||{article:k,ref:'',taille:'',zones:[],stock:0};lines.push([c.article,c.ref,c.taille,c.zones.join(' '),c.stock,counts[k].n,counts[k].n-c.stock].map(q).join(','))});
+  const csv='\ufeff'+lines.join('\n');
+  try{const dl=await claude.use('downloads');if(!dl)throw 0;await dl.save({filename:'comptage_stock.csv',data:csv});}
+  catch(e){if(e&&e.code==='declined')return;try{await navigator.clipboard.writeText(csv);msg('Export copié dans le presse-papiers : colle-le dans Google Sheets.')}catch(_){msg('Export indisponible dans cet affichage.')}}};
+
+/* Caméra */
+let stream=null,running=false,zx=null,lastC='',lastT=0;
+function hit(code){const now=Date.now();if(code===lastC&&now-lastT<2000)return;lastC=code;lastT=now;lookup(code)}
+async function startCam(){
+  const v=$('#v');
+  try{
+    if('BarcodeDetector' in window){
+      const det=new BarcodeDetector();
+      stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'}});
+      v.srcObject=stream;v.style.display='block';await v.play();running=true;
+      (async function loop(){if(!running)return;try{const r=await det.detect(v);if(r[0])hit(r[0].rawValue)}catch(e){}setTimeout(loop,250)})();
+    }else if(window.ZXing){
+      v.style.display='block';zx=new ZXing.BrowserMultiFormatReader();
+      await zx.decodeFromConstraints({video:{facingMode:'environment'}},v,r=>{if(r)hit(r.getText())});running=true;
+    }else throw new Error('x');
+    $('#bCam').textContent='⏹ Arrêter';
+  }catch(e){running=false;v.style.display='none';msg('Caméra indisponible ici. Utilise le champ de saisie (ou une douchette Bluetooth).')}}
+function stopCam(){running=false;if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;if(zx){try{zx.reset()}catch(e){}zx=null}$('#v').style.display='none';$('#bCam').textContent='📷 Scanner'}
+$('#bCam').onclick=()=>running?stopCam():startCam();
+info();render();
+</script>
+</body>
+</html>
